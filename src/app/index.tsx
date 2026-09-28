@@ -754,27 +754,89 @@ export default function App() {
 
       setLocationStatus("Mencari lokasi...");
 
-      // Timeout 10 detik, biar ga hang selamanya
-      const locationPromise = Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.High,
-      });
+      let first: Location.LocationObject | null = null;
 
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("GPS timeout")), 10000)
-      );
-
-      let first;
+      // 1. Coba ambil Last Known Position duluan (cepet, ga hang)
       try {
-        first = await Promise.race([locationPromise, timeoutPromise]);
-      } catch {
-        // Fallback: coba last known position
-        const last = await Location.getLastKnownPositionAsync();
+        const last = await Location.getLastKnownPositionAsync({
+          maxAge: 120000,
+          requiredAccuracy: 200,
+        });
         if (last) {
           first = last;
-        } else {
-          throw new Error("GPS tidak tersedia");
+          console.log("OK: pakai last known position");
+        }
+      } catch (e) {
+        console.log("Last known gagal:", e);
+      }
+
+      // 2. Kalau ga ada, coba current position dengan accuracy paling rendah
+      if (!first) {
+        try {
+          first = await Promise.race<Location.LocationObject>([
+            Location.getCurrentPositionAsync({
+              accuracy: Location.Accuracy.Lowest,
+            }),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error("Timeout")), 5000)
+            ),
+          ]);
+          console.log("OK: pakai current position (Lowest)");
+        } catch (e) {
+          console.log("Current position Lowest gagal:", e);
         }
       }
+
+      // 3. Coba lagi dengan Balanced
+      if (!first) {
+        try {
+          first = await Promise.race<Location.LocationObject>([
+            Location.getCurrentPositionAsync({
+              accuracy: Location.Accuracy.Balanced,
+            }),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error("Timeout")), 8000)
+            ),
+          ]);
+          console.log("OK: pakai current position (Balanced)");
+        } catch (e) {
+          console.log("Current position Balanced gagal:", e);
+        }
+      }
+
+      // 4. Terakhir, paksa pakai watchPosition sekali
+      if (!first) {
+        try {
+          first = await new Promise<Location.LocationObject>(
+            (resolve, reject) => {
+              const timeout = setTimeout(
+                () => reject(new Error("Watch timeout")),
+                10000
+              );
+              Location.watchPositionAsync(
+                { accuracy: Location.Accuracy.Lowest },
+                (loc) => {
+                  clearTimeout(timeout);
+                  resolve(loc);
+                }
+              );
+            }
+          );
+          console.log("OK: pakai watch position");
+        } catch (e) {
+          console.log("Watch position gagal:", e);
+        }
+      }
+
+      if (!first) {
+        throw new Error("GPS tidak tersedia setelah semua percobaan");
+      }
+
+      console.log(
+        "Lokasi didapat:",
+        first.coords.latitude,
+        first.coords.longitude
+      );
 
       const firstPoint = {
         latitude: first.coords.latitude,
@@ -871,8 +933,6 @@ export default function App() {
               movingSamplesRef.current = 0;
             }
 
-            // Butuh dua pembacaan GPS berturut-turut agar perpindahan kecil
-            // akibat noise GPS saat diam tidak langsung dianggap gerakan.
             const isMoving = rawMoving && movingSamplesRef.current >= 2;
 
             isMovingRef.current = isMoving;
@@ -899,15 +959,12 @@ export default function App() {
                 : "GPS aktif • Menunggu gerakan"
             );
 
-            // Akumulasi jarak walau sesaat "tidak bergerak",
-            // biar notif 1 km tidak ke-skip saat berhenti di lampu merah.
             if (hasGoodAccuracy && dist <= 0.2) {
               const newDistance = distanceRef.current + dist;
               distanceRef.current = newDistance;
               setDistance(newDistance);
             }
 
-            // Cek notif 1 km TERPISAH dari kondisi isMoving.
             const currentKm = Math.floor(distanceRef.current);
             if (currentKm > lastSpokenKmRef.current && currentKm >= 1) {
               lastSpokenKmRef.current = currentKm;
@@ -915,8 +972,6 @@ export default function App() {
               void speakDistance(currentKm);
             }
 
-            // Simpan titik rute hanya saat benar-benar bergerak,
-            // biar garis tidak penuh noise GPS saat diam.
             if (isMoving && dist <= 0.2) {
               setRoute((prev) => {
                 if (prev.length > 0) {
