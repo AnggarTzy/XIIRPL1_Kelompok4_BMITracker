@@ -1,6 +1,7 @@
 import { FontAwesome5, MaterialCommunityIcons } from "@expo/vector-icons";
 import * as Location from "expo-location";
 import * as Speech from "expo-speech";
+import * as Notifications from "expo-notifications";
 import * as TaskManager from "expo-task-manager";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useEffect, useRef, useState } from "react";
@@ -23,6 +24,17 @@ import {
 } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { WebView } from "react-native-webview";
+
+// Handler notifikasi — biar notif tetap muncul walau app di background
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: false,
+    shouldSetBadge: false,
+    shouldShowBanner: true,
+    shouldShowList: true,
+  }),
+});
 
 type ActivityType = "Joging" | "Lari" | "Bersepeda";
 type Gender = "Pria" | "Wanita";
@@ -117,12 +129,27 @@ if (!TaskManager.isTaskDefined(BACKGROUND_LOCATION_TASK)) {
           const moving = hasGoodAccuracy && (movingBySpeed || movingByDistance);
 
           if (moving && dist <= 0.2) {
+            const prevKm = Math.floor(next.distance);
             next.distance += dist;
+            const currentKm = Math.floor(next.distance);
+
             const elapsed = Math.max(
               0,
               Math.floor((timestamp - next.lastTimestamp) / 1000)
             );
             next.activeDuration += Math.min(elapsed, 30);
+
+            // Notif TTS tiap kelipatan 1 km walau HP dikunci
+            if (currentKm > prevKm && currentKm >= 1) {
+              try {
+                Speech.speak(`Jarak sudah ${currentKm} kilometer`, {
+                  language: "id-ID",
+                  rate: 0.9,
+                  pitch: 1.0,
+                  volume: 1.0,
+                });
+              } catch {}
+            }
           }
         }
 
@@ -357,17 +384,30 @@ export default function App() {
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const backgroundTrackingRef = useRef(false);
 
-  // ================= TEST TTS (hapus kalau sudah yakin TTS jalan) =================
+  // ================= MINTA IZIN NOTIFIKASI + BACKGROUND LOCATION =================
   useEffect(() => {
-    console.log("TEST TTS: mulai");
-    Speech.speak("Tes suara IFit satu dua tiga", {
-      language: "id-ID",
-      rate: 0.9,
-      onStart: () => console.log("TTS: mulai bicara"),
-      onDone: () => console.log("TTS: selesai"),
-      onStopped: () => console.log("TTS: dihentikan"),
-      onError: (e) => console.log("TTS error:", e),
-    });
+    (async () => {
+      // 1. Minta izin notifikasi (Android 13+)
+      try {
+        const notifPerm = await Notifications.requestPermissionsAsync();
+        console.log("Notif permission:", notifPerm.status);
+      } catch (e) {
+        console.log("Gagal minta izin notif:", e);
+      }
+
+      // 2. Minta izin lokasi background secara eksplisit
+      try {
+        const fg = await Location.getForegroundPermissionsAsync();
+        console.log("Foreground location:", fg.status);
+
+        if (fg.status === "granted") {
+          const bg = await Location.requestBackgroundPermissionsAsync();
+          console.log("Background location:", bg.status);
+        }
+      } catch (e) {
+        console.log("Gagal minta izin lokasi:", e);
+      }
+    })();
   }, []);
 
   const theme = isDark
@@ -714,9 +754,27 @@ export default function App() {
 
       setLocationStatus("Mencari lokasi...");
 
-      const first = await Location.getCurrentPositionAsync({
+      // Timeout 10 detik, biar ga hang selamanya
+      const locationPromise = Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.High,
       });
+
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("GPS timeout")), 10000)
+      );
+
+      let first;
+      try {
+        first = await Promise.race([locationPromise, timeoutPromise]);
+      } catch {
+        // Fallback: coba last known position
+        const last = await Location.getLastKnownPositionAsync();
+        if (last) {
+          first = last;
+        } else {
+          throw new Error("GPS tidak tersedia");
+        }
+      }
 
       const firstPoint = {
         latitude: first.coords.latitude,

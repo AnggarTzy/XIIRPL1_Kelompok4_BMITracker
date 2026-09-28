@@ -1,17 +1,15 @@
 {
   "expo": {
-    "name": "PBTG_DESTA",
-    "slug": "PBTG_DESTA",
+    "name": "kalkulator_bmi",
+    "slug": "kalkulator_bmi",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "pbtgdesta",
+    "scheme": "kalkulatorbmi",
     "userInterfaceStyle": "automatic",
-
     "ios": {
       "icon": "./assets/expo.icon"
     },
-
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
@@ -20,14 +18,12 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
-      "package": "com.destadev.PBTG_DESTA"
+      "package": "com.anggartzy.kalkulatorbmi"
     },
-
     "web": {
       "output": "static",
       "favicon": "./assets/images/favicon.png"
     },
-
     "plugins": [
       "expo-router",
       [
@@ -39,16 +35,14 @@
         }
       ]
     ],
-
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
     },
-
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "077002f5-7304-4079-acfa-984b31ad4398"
+        "projectId": "db499ab8-7a3c-49a2-a0f2-4ba578f34c09"
       }
     }
   }
