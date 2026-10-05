@@ -75,13 +75,6 @@ if (Platform.OS === "android") {
     vibrationPattern: [0, 250, 250, 250],
     lightColor: BRAND.primary,
   });
-  Notifications.setNotificationChannelAsync("ifit-goal", {
-    name: "Target Harian",
-    importance: Notifications.AndroidImportance.HIGH,
-    sound: "default",
-    vibrationPattern: [0, 250, 250, 250],
-    lightColor: BRAND.primary,
-  });
 }
 
 // ============================================================
@@ -104,6 +97,7 @@ type StoredTrackerState = {
   lastLocation: LatLng | null;
   lastTimestamp: number | null;
   lastSpokenKm: number;
+  startedAt: number | null;
 };
 
 type HistoryItem = {
@@ -141,16 +135,10 @@ const SETTINGS_STORAGE_KEY = "@ifit_settings";
 const MAX_HISTORY = 200;
 const SIDEBAR_HISTORY_PREVIEW = 5;
 const AUTO_PAUSE_MS = 20000;
-const DEFAULT_DAILY_GOAL = 5;
 
 // ============================================================
 // HELPERS
 // ============================================================
-
-const todayKey = (ts: number) => {
-  const d = new Date(ts);
-  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
-};
 
 const notifyKmReached = async (km: number) => {
   try {
@@ -166,23 +154,6 @@ const notifyKmReached = async (km: number) => {
     });
   } catch (e) {
     console.log("Notif error:", e);
-  }
-};
-
-const notifyGoalReached = async (km: number) => {
-  try {
-    await Notifications.scheduleNotificationAsync({
-      content: {
-        title: "🏆 Target Harian Tercapai!",
-        body: `Kamu sudah mencapai target ${km} km hari ini. Keren!`,
-        sound: "default",
-        priority: Notifications.AndroidNotificationPriority.HIGH,
-        ...(Platform.OS === "android" && { channelId: "ifit-goal" }),
-      },
-      trigger: null,
-    });
-  } catch (e) {
-    console.log("Notif goal error:", e);
   }
 };
 
@@ -472,13 +443,6 @@ export default function App() {
   const [locationSub, setLocationSub] =
     useState<Location.LocationSubscription | null>(null);
 
-  // GOAL
-  const [dailyGoalKm, setDailyGoalKm] = useState(DEFAULT_DAILY_GOAL);
-  const [goalInputVisible, setGoalInputVisible] = useState(false);
-  const [goalInputValue, setGoalInputValue] = useState(
-    String(DEFAULT_DAILY_GOAL)
-  );
-
   // HISTORY
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [historyModalVisible, setHistoryModalVisible] = useState(false);
@@ -501,6 +465,13 @@ export default function App() {
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const backgroundTrackingRef = useRef(false);
   const backgroundSyncInProgressRef = useRef(false);
+  
+  // === FIX MASALAH 1 & 2 & 3 ===
+  const pausedTotalRef = useRef(0);              // total ms di-pause
+  const pauseStartedAtRef = useRef<number | null>(null);  // kapan mulai pause
+  const stoppingRef = useRef(false);             // guard stop dobel
+  const activityTypeRef = useRef<ActivityType>("Joging");  // untuk akses di closure
+  const sessionIdRef = useRef<string | null>(null);  // ID unik per sesi
 
   // ANIMATION
   const pulseAnim = useRef(new Animated.Value(1)).current;
@@ -510,6 +481,10 @@ export default function App() {
     isPausedRef.current = isPaused;
   }, [isPaused]);
 
+  useEffect(() => {
+    activityTypeRef.current = activityType;
+  }, [activityType]);
+
   // LOAD SETTINGS & HISTORY
   useEffect(() => {
     void loadAll();
@@ -518,6 +493,36 @@ export default function App() {
   const loadAll = async () => {
     await loadHistory();
     await loadSettings();
+    await recoverFromCrash();
+  };
+
+  // === FIX MASALAH 3: recover from crash ===
+  const recoverFromCrash = async () => {
+    try {
+      const raw = await AsyncStorage.getItem(TRACKER_STORAGE_KEY);
+      if (!raw) return;
+      const state: StoredTrackerState = JSON.parse(raw);
+      // Kalau ada state "tracking=true" tapi app baru buka
+      // berarti app sebelumnya crash → bersihkan state
+      if (state.tracking) {
+        console.log("Recovering from crash — cleaning stale state");
+        await AsyncStorage.setItem(
+          TRACKER_STORAGE_KEY,
+          JSON.stringify({
+            ...state,
+            tracking: false,
+            paused: false,
+            lastLocation: null,
+            lastTimestamp: null,
+          })
+        );
+      }
+      // Kalau ada pause yang belum selesai, reset
+      pausedTotalRef.current = 0;
+      pauseStartedAtRef.current = null;
+    } catch (e) {
+      console.log("recoverFromCrash error:", e);
+    }
   };
 
   const loadSettings = async () => {
@@ -525,10 +530,6 @@ export default function App() {
       const raw = await AsyncStorage.getItem(SETTINGS_STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (typeof parsed.dailyGoalKm === "number") {
-          setDailyGoalKm(parsed.dailyGoalKm);
-          setGoalInputValue(String(parsed.dailyGoalKm));
-        }
         if (typeof parsed.isDark === "boolean") {
           setIsDark(parsed.isDark);
         }
@@ -539,13 +540,9 @@ export default function App() {
   };
 
   const saveSettings = async (
-    overrides: Partial<{
-      dailyGoalKm: number;
-      isDark: boolean;
-    }> = {}
+    overrides: Partial<{ isDark: boolean }> = {}
   ) => {
     const data = {
-      dailyGoalKm,
       isDark,
       ...overrides,
     };
@@ -555,21 +552,6 @@ export default function App() {
         JSON.stringify(data)
       );
     } catch {}
-  };
-
-  const changeDailyGoal = async (value: string) => {
-    const n = parseFloat(value);
-    if (!Number.isFinite(n) || n <= 0) {
-      Alert.alert(
-        "Target tidak valid",
-        "Masukkan angka lebih dari 0 (contoh: 5)."
-      );
-      return;
-    }
-    setDailyGoalKm(n);
-    setGoalInputValue(String(n));
-    await saveSettings({ dailyGoalKm: n });
-    setGoalInputVisible(false);
   };
 
   const toggleDarkMode = async (value: boolean) => {
@@ -592,7 +574,14 @@ export default function App() {
 
   const saveHistoryItem = async (item: HistoryItem) => {
     try {
-      const updated = [item, ...history].slice(0, MAX_HISTORY);
+      const raw = await AsyncStorage.getItem(HISTORY_STORAGE_KEY);
+      const existing: HistoryItem[] = raw ? JSON.parse(raw) : [];
+      // Cegah duplikat by id
+      if (existing.some((h) => h.id === item.id)) {
+        console.log("Duplicate history item, skip:", item.id);
+        return;
+      }
+      const updated = [item, ...existing].slice(0, MAX_HISTORY);
       setHistory(updated);
       await AsyncStorage.setItem(
         HISTORY_STORAGE_KEY,
@@ -647,34 +636,6 @@ export default function App() {
     if (historyFilter === "Semua") return history;
     return history.filter((h) => h.activityType === historyFilter);
   }, [history, historyFilter]);
-
-  // TODAY STATS
-  const todayStats = useMemo(() => {
-    const today = todayKey(Date.now());
-    const todaysItems = history.filter((h) => todayKey(h.date) === today);
-    const totalKm = todaysItems.reduce((sum, h) => sum + h.distance, 0);
-    return {
-      totalKm,
-      sessions: todaysItems.length,
-    };
-  }, [history]);
-
-  const goalReached = todayStats.totalKm >= dailyGoalKm;
-  const goalProgress = Math.min(
-    1,
-    dailyGoalKm > 0 ? todayStats.totalKm / dailyGoalKm : 0
-  );
-
-  const goalNotifiedRef = useRef(false);
-  useEffect(() => {
-    if (goalReached && !goalNotifiedRef.current) {
-      goalNotifiedRef.current = true;
-      void notifyGoalReached(dailyGoalKm);
-    }
-    if (!goalReached) {
-      goalNotifiedRef.current = false;
-    }
-  }, [goalReached, dailyGoalKm]);
 
   // THEME
   const theme = isDark
@@ -922,13 +883,14 @@ export default function App() {
     const state: StoredTrackerState = {
       tracking: isTracking,
       paused: isPausedRef.current,
-      activityType,
+      activityType: activityTypeRef.current,
       weight: parseFloat(weight) > 0 ? parseFloat(weight) : 60,
-      distance,
+      distance: distanceRef.current,
       activeDuration,
       lastLocation: lastLocation.current,
       lastTimestamp: Date.now(),
       lastSpokenKm: lastSpokenKmRef.current,
+      startedAt: startTimeRef.current,
       ...overrides,
     };
     try {
@@ -1011,15 +973,49 @@ export default function App() {
     }
   };
 
+  // === FIX MASALAH 1: restart timer helper ===
+  const startTimer = () => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    timerRef.current = setInterval(() => {
+      if (startTimeRef.current !== null) {
+        const elapsed = Math.floor(
+          (Date.now() - startTimeRef.current - pausedTotalRef.current) / 1000
+        );
+        setDuration(Math.max(0, elapsed));
+
+        if (
+          isMovingRef.current &&
+          !isPausedRef.current &&
+          !autoPausedRef.current
+        ) {
+          setActiveDuration((prev) => prev + 1);
+        }
+      }
+    }, 1000);
+  };
+
   // START TRACKING
   const startTracking = async () => {
     if (isTracking) return;
+    
+    // Reset state lengkap
     lastSpokenKmRef.current = 0;
     isMovingRef.current = false;
     isPausedRef.current = false;
     autoPausedRef.current = false;
     movingSamplesRef.current = 0;
     lastMovementAtRef.current = Date.now();
+    pausedTotalRef.current = 0;
+    pauseStartedAtRef.current = null;
+    stoppingRef.current = false;
+    setDistance(0);
+    distanceRef.current = 0;
+    setDuration(0);
+    setActiveDuration(0);
+    setCalories(0);
+    setPace(0);
+    setRoute([]);
+    setCurrentLocation(null);
     setIsMoving(false);
     setIsPaused(false);
 
@@ -1146,6 +1142,12 @@ export default function App() {
         longitude: firstLocation.coords.longitude,
       };
 
+      // Generate session ID unik
+      const sessionId = `${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+      sessionIdRef.current = sessionId;
+
       setCurrentLocation(firstPoint);
       setRoute([firstPoint]);
       lastLocation.current = firstPoint;
@@ -1158,15 +1160,6 @@ export default function App() {
       lastHeadingRef.current = initialHeading;
       setHeading(initialHeading);
 
-      setDistance(0);
-      distanceRef.current = 0;
-      setDuration(0);
-      setActiveDuration(0);
-      setCalories(0);
-      setPace(0);
-      movingSamplesRef.current = 0;
-      isMovingRef.current = false;
-      setIsMoving(false);
       setIsTracking(true);
       setIsPaused(false);
       isPausedRef.current = false;
@@ -1183,25 +1176,10 @@ export default function App() {
         lastLocation: firstPoint,
         lastTimestamp: Date.now(),
         lastSpokenKm: 0,
+        startedAt: startTimeRef.current,
       });
 
-      if (timerRef.current) clearInterval(timerRef.current);
-      timerRef.current = setInterval(() => {
-        if (startTimeRef.current !== null) {
-          const elapsed = Math.floor(
-            (Date.now() - startTimeRef.current) / 1000
-          );
-          setDuration(elapsed);
-
-          if (
-            isMovingRef.current &&
-            !isPausedRef.current &&
-            !autoPausedRef.current
-          ) {
-            setActiveDuration((prev) => prev + 1);
-          }
-        }
-      }, 1000);
+      startTimer();
 
       const subscription = await Location.watchPositionAsync(
         {
@@ -1210,6 +1188,9 @@ export default function App() {
           distanceInterval: 1,
         },
         (newLocation) => {
+          // Guard: pastikan session masih sama
+          if (sessionIdRef.current !== sessionId) return;
+          
           const point: LatLng = {
             latitude: newLocation.coords.latitude,
             longitude: newLocation.coords.longitude,
@@ -1318,13 +1299,6 @@ export default function App() {
                 });
                 void speakDistance(currentKm);
               }
-
-              const totalToday =
-                todayStats.totalKm + (newDistance - distance);
-              if (totalToday >= dailyGoalKm && !goalNotifiedRef.current) {
-                goalNotifiedRef.current = true;
-                void notifyGoalReached(dailyGoalKm);
-              }
             }
 
             if (
@@ -1377,6 +1351,7 @@ export default function App() {
         timerRef.current = null;
       }
       startTimeRef.current = null;
+      sessionIdRef.current = null;
       setLocationStatus("Gagal mendapatkan lokasi");
 
       Alert.alert(
@@ -1386,12 +1361,22 @@ export default function App() {
     }
   };
 
-  // PAUSE / RESUME
+  // === FIX MASALAH 1: PAUSE / RESUME dengan timer stop ===
   const pauseTracking = async () => {
     if (!isTracking) return;
+    if (isPausedRef.current) return;
+    
     setIsPaused(true);
     isPausedRef.current = true;
+    pauseStartedAtRef.current = Date.now();
     setLocationStatus("Dijeda • Timer berhenti");
+    
+    // STOP timer
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    
     await saveTrackerState({
       tracking: true,
       paused: true,
@@ -1405,11 +1390,23 @@ export default function App() {
 
   const resumeTracking = async () => {
     if (!isTracking) return;
+    if (!isPausedRef.current) return;
+    
+    // Akumulasi waktu pause
+    if (pauseStartedAtRef.current !== null) {
+      pausedTotalRef.current += Date.now() - pauseStartedAtRef.current;
+      pauseStartedAtRef.current = null;
+    }
+    
     setIsPaused(false);
     isPausedRef.current = false;
     autoPausedRef.current = false;
     lastMovementAtRef.current = Date.now();
     setLocationStatus("GPS aktif • Menunggu gerakan");
+    
+    // RESTART timer
+    startTimer();
+    
     await saveTrackerState({
       tracking: true,
       paused: false,
@@ -1421,96 +1418,116 @@ export default function App() {
     });
   };
 
-  // STOP TRACKING
+  // === FIX MASALAH 2 & 3: STOP dengan guard + reset total ===
   const stopTracking = async () => {
-    setIsTracking(false);
-    setIsPaused(false);
-    isPausedRef.current = false;
-    autoPausedRef.current = false;
-    isMovingRef.current = false;
-    movingSamplesRef.current = 0;
-    setIsMoving(false);
-
-    let finalDuration = duration;
-    if (startTimeRef.current !== null) {
-      const elapsed = Math.floor(
-        (Date.now() - startTimeRef.current) / 1000
-      );
-      finalDuration = elapsed;
-      setDuration(elapsed);
-    }
-
-    if (timerRef.current) {
-      clearInterval(timerRef.current);
-      timerRef.current = null;
-    }
-    startTimeRef.current = null;
-    locationSub?.remove();
-    setLocationSub(null);
-    lastLocation.current = null;
-    await stopBackgroundLocation();
-
-    if (distanceRef.current > 0.01 || activeDuration > 5) {
-      const historyItem: HistoryItem = {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        date: Date.now(),
-        activityType,
-        distance: distanceRef.current,
-        duration: finalDuration,
-        activeDuration,
-        calories,
-        pace,
-      };
-      await saveHistoryItem(historyItem);
-      console.log("Riwayat disimpan:", historyItem);
-    }
+    if (stoppingRef.current) return;
+    if (!isTracking) return;
+    stoppingRef.current = true;
 
     try {
-      await AsyncStorage.setItem(
-        TRACKER_STORAGE_KEY,
-        JSON.stringify({
-          tracking: false,
-          paused: false,
-          activityType,
-          weight: parseFloat(weight) > 0 ? parseFloat(weight) : 60,
-          distance,
-          activeDuration,
-          lastLocation: null,
-          lastTimestamp: null,
-          lastSpokenKm: lastSpokenKmRef.current,
-        } as StoredTrackerState)
-      );
-    } catch {}
+      // Hitung durasi final
+      let finalDuration = duration;
+      if (startTimeRef.current !== null) {
+        const elapsed = Math.floor(
+          (Date.now() - startTimeRef.current - pausedTotalRef.current) / 1000
+        );
+        finalDuration = Math.max(0, elapsed);
+      }
+      
+      // Snapshot nilai saat ini (biar nggak kena async setState)
+      const finalDistance = distanceRef.current;
+      const finalActiveDuration = activeDuration;
+      const finalCalories = calories;
+      const finalPace = pace;
+      const finalActivityType = activityTypeRef.current;
+      const finalSessionId = sessionIdRef.current;
 
-    setLocationStatus("Pelacakan dihentikan");
+      // Set state UI
+      setIsTracking(false);
+      setIsPaused(false);
+      isPausedRef.current = false;
+      autoPausedRef.current = false;
+      isMovingRef.current = false;
+      movingSamplesRef.current = 0;
+      setIsMoving(false);
+
+      // Clear timer & subscription
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+      startTimeRef.current = null;
+      pausedTotalRef.current = 0;
+      pauseStartedAtRef.current = null;
+      locationSub?.remove();
+      setLocationSub(null);
+      lastLocation.current = null;
+      sessionIdRef.current = null;
+
+      await stopBackgroundLocation();
+
+      // Simpan ke riwayat
+      if (finalDistance > 0.01 || finalActiveDuration > 5) {
+        const historyItem: HistoryItem = {
+          id: finalSessionId ?? `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          date: Date.now(),
+          activityType: finalActivityType,
+          distance: finalDistance,
+          duration: finalDuration,
+          activeDuration: finalActiveDuration,
+          calories: finalCalories,
+          pace: finalPace,
+        };
+        await saveHistoryItem(historyItem);
+        console.log("Riwayat disimpan:", historyItem);
+      }
+
+      // Reset semua state
+      setDistance(0);
+      distanceRef.current = 0;
+      setDuration(0);
+      setActiveDuration(0);
+      setCalories(0);
+      setPace(0);
+      setRoute([]);
+      setCurrentLocation(null);
+      lastSpokenKmRef.current = 0;
+      lastHeadingRef.current = 0;
+      setHeading(0);
+
+      webViewRef.current?.injectJavaScript(`
+        if (typeof resetMap === "function") { resetMap(); }
+        true;
+      `);
+
+      try {
+        await AsyncStorage.setItem(
+          TRACKER_STORAGE_KEY,
+          JSON.stringify({
+            tracking: false,
+            paused: false,
+            activityType: finalActivityType,
+            weight: parseFloat(weight) > 0 ? parseFloat(weight) : 60,
+            distance: 0,
+            activeDuration: 0,
+            lastLocation: null,
+            lastTimestamp: null,
+            lastSpokenKm: 0,
+            startedAt: null,
+          } as StoredTrackerState)
+        );
+      } catch {}
+
+      setLocationStatus("Pelacakan dihentikan");
+    } finally {
+      stoppingRef.current = false;
+    }
   };
 
   // RESET TRACKING
   const resetTracking = async () => {
     await stopTracking();
-    startTimeRef.current = null;
-    setDistance(0);
-    distanceRef.current = 0;
-    lastSpokenKmRef.current = 0;
-    lastHeadingRef.current = 0;
-    setHeading(0);
-    setDuration(0);
-    setActiveDuration(0);
-    setCalories(0);
-    setPace(0);
-    setRoute([]);
-    setCurrentLocation(null);
-
-    webViewRef.current?.injectJavaScript(`
-      if (typeof resetMap === "function") { resetMap(); }
-      true;
-    `);
-
-    try {
-      await AsyncStorage.removeItem(TRACKER_STORAGE_KEY);
-    } catch {}
-
-    await stopBackgroundLocation();
+    // State sudah di-reset di stopTracking
     setLocationStatus("Lokasi belum aktif");
   };
 
@@ -1571,13 +1588,16 @@ export default function App() {
             await saveTrackerState({
               tracking: true,
               paused: isPausedRef.current,
-              distance,
+              distance: distanceRef.current,
               activeDuration,
               lastLocation: lastLocation.current,
               lastTimestamp: Date.now(),
               lastSpokenKm: lastSpokenKmRef.current,
             });
-            await startBackgroundLocation();
+            // Cuma start background kalau TIDAK paused
+            if (!isPausedRef.current) {
+              await startBackgroundLocation();
+            }
           }
 
           if (
@@ -1652,7 +1672,7 @@ export default function App() {
       }
     );
     return () => subscription.remove();
-  }, [isTracking, distance, activeDuration]);
+  }, [isTracking, activeDuration]);
 
   // CLEANUP
   useEffect(() => {
@@ -1727,7 +1747,7 @@ export default function App() {
       >
         <StatusBar barStyle={isDark ? "light-content" : "dark-content"} />
 
-        {/* HEADER — streak dihapus */}
+        {/* HEADER */}
         <View
           style={[
             styles.header,
@@ -1760,7 +1780,7 @@ export default function App() {
                 style={[styles.headerSub, { color: theme.muted }]}
                 numberOfLines={1}
               >
-                🎯 {todayStats.totalKm.toFixed(1)} / {dailyGoalKm} km hari ini
+                Ayo mulai tracking hari ini
               </Text>
             </View>
           </View>
@@ -1774,163 +1794,6 @@ export default function App() {
           contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
         >
-          {/* GOAL CARD — streak dihapus */}
-          <View style={[styles.card, { backgroundColor: theme.card }]}>
-            <View style={styles.cardHeader}>
-              <View
-                style={[
-                  styles.iconCircle,
-                  { backgroundColor: BRAND.warningSoft },
-                ]}
-              >
-                <MaterialCommunityIcons
-                  name="target"
-                  size={26}
-                  color={BRAND.warning}
-                />
-              </View>
-
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.cardTitle, { color: theme.text }]}>
-                  Target Harian
-                </Text>
-                <Text style={[styles.cardSubtitle, { color: theme.muted }]}>
-                  Capaian harian kamu
-                </Text>
-              </View>
-
-              <TouchableOpacity
-                onPress={() => {
-                  setGoalInputValue(String(dailyGoalKm));
-                  setGoalInputVisible(true);
-                }}
-                style={{
-                  paddingHorizontal: 12,
-                  paddingVertical: 8,
-                  borderRadius: 10,
-                  backgroundColor: BRAND.primarySoft,
-                }}
-              >
-                <Text
-                  style={{
-                    color: BRAND.primaryDark,
-                    fontSize: 12,
-                    fontWeight: "800",
-                  }}
-                >
-                  Atur
-                </Text>
-              </TouchableOpacity>
-            </View>
-
-            <View style={{ marginBottom: 12 }}>
-              <View
-                style={{
-                  flexDirection: "row",
-                  justifyContent: "space-between",
-                  marginBottom: 8,
-                }}
-              >
-                <Text
-                  style={{
-                    color: theme.muted,
-                    fontSize: 12,
-                    fontWeight: "700",
-                  }}
-                >
-                  Progress Hari Ini
-                </Text>
-                <Text
-                  style={{
-                    color: BRAND.primary,
-                    fontSize: 13,
-                    fontWeight: "900",
-                  }}
-                >
-                  {todayStats.totalKm.toFixed(2)} / {dailyGoalKm} km
-                </Text>
-              </View>
-
-              <View
-                style={{
-                  height: 12,
-                  borderRadius: 6,
-                  backgroundColor: theme.soft,
-                  overflow: "hidden",
-                }}
-              >
-                <View
-                  style={{
-                    width: `${goalProgress * 100}%`,
-                    height: "100%",
-                    backgroundColor: goalReached
-                      ? BRAND.primary
-                      : BRAND.warning,
-                    borderRadius: 6,
-                  }}
-                />
-              </View>
-
-              {goalReached && (
-                <View
-                  style={{
-                    flexDirection: "row",
-                    alignItems: "center",
-                    marginTop: 8,
-                    gap: 6,
-                  }}
-                >
-                  <FontAwesome5
-                    name="trophy"
-                    size={12}
-                    color={BRAND.primary}
-                  />
-                  <Text
-                    style={{
-                      color: BRAND.primary,
-                      fontSize: 12,
-                      fontWeight: "800",
-                    }}
-                  >
-                    Target tercapai! 🎉
-                  </Text>
-                </View>
-              )}
-            </View>
-
-            {/* Cuma sesi hari ini (streak dihapus) */}
-            <View
-              style={{
-                backgroundColor: BRAND.primarySoft,
-                borderRadius: 12,
-                padding: 12,
-                alignItems: "center",
-              }}
-            >
-              <FontAwesome5 name="running" size={18} color={BRAND.primary} />
-              <Text
-                style={{
-                  color: BRAND.primaryDark,
-                  fontSize: 22,
-                  fontWeight: "900",
-                  marginTop: 6,
-                }}
-              >
-                {todayStats.sessions}
-              </Text>
-              <Text
-                style={{
-                  color: BRAND.primaryDark,
-                  fontSize: 10,
-                  fontWeight: "700",
-                  marginTop: 2,
-                }}
-              >
-                SESI HARI INI
-              </Text>
-            </View>
-          </View>
-
           {/* BMI CARD */}
           <View style={[styles.card, { backgroundColor: theme.card }]}>
             <View style={styles.cardHeader}>
@@ -2471,190 +2334,6 @@ export default function App() {
           </Text>
         </ScrollView>
 
-        {/* MODAL ATUR TARGET */}
-        <Modal
-          visible={goalInputVisible}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setGoalInputVisible(false)}
-        >
-          <View
-            style={{
-              flex: 1,
-              backgroundColor: "rgba(0,0,0,0.55)",
-              justifyContent: "center",
-              alignItems: "center",
-              padding: 24,
-            }}
-          >
-            <View
-              style={{
-                width: "100%",
-                maxWidth: 360,
-                backgroundColor: theme.card,
-                borderRadius: 20,
-                padding: 22,
-              }}
-            >
-              <View
-                style={{
-                  flexDirection: "row",
-                  alignItems: "center",
-                  gap: 10,
-                  marginBottom: 16,
-                }}
-              >
-                <View
-                  style={{
-                    width: 44,
-                    height: 44,
-                    borderRadius: 12,
-                    backgroundColor: BRAND.warningSoft,
-                    alignItems: "center",
-                    justifyContent: "center",
-                  }}
-                >
-                  <MaterialCommunityIcons
-                    name="target"
-                    size={22}
-                    color={BRAND.warning}
-                  />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text
-                    style={{
-                      color: theme.text,
-                      fontSize: 16,
-                      fontWeight: "900",
-                    }}
-                  >
-                    Atur Target Harian
-                  </Text>
-                  <Text
-                    style={{
-                      color: theme.muted,
-                      fontSize: 11,
-                      marginTop: 2,
-                    }}
-                  >
-                    Target jarak yang ingin dicapai setiap hari
-                  </Text>
-                </View>
-              </View>
-
-              <Text
-                style={{
-                  color: theme.muted,
-                  fontSize: 11,
-                  fontWeight: "700",
-                  marginBottom: 6,
-                }}
-              >
-                Target (km)
-              </Text>
-
-              <TextInput
-                value={goalInputValue}
-                onChangeText={setGoalInputValue}
-                keyboardType="decimal-pad"
-                placeholder="Contoh: 5"
-                placeholderTextColor={theme.muted}
-                style={{
-                  borderWidth: 1.5,
-                  borderColor: theme.border,
-                  borderRadius: 12,
-                  padding: 14,
-                  fontSize: 18,
-                  fontWeight: "800",
-                  color: theme.text,
-                  backgroundColor: theme.input,
-                  textAlign: "center",
-                }}
-              />
-
-              <View
-                style={{
-                  flexDirection: "row",
-                  gap: 8,
-                  marginTop: 14,
-                  flexWrap: "wrap",
-                }}
-              >
-                {[1, 3, 5, 10].map((v) => (
-                  <TouchableOpacity
-                    key={v}
-                    onPress={() => setGoalInputValue(String(v))}
-                    style={{
-                      paddingHorizontal: 12,
-                      paddingVertical: 8,
-                      borderRadius: 10,
-                      backgroundColor: theme.soft,
-                      borderWidth: 1,
-                      borderColor: theme.border,
-                    }}
-                  >
-                    <Text
-                      style={{
-                        color: theme.text,
-                        fontSize: 12,
-                        fontWeight: "800",
-                      }}
-                    >
-                      {v} km
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-
-              <View style={{ flexDirection: "row", gap: 8, marginTop: 18 }}>
-                <TouchableOpacity
-                  onPress={() => setGoalInputVisible(false)}
-                  style={{
-                    flex: 1,
-                    paddingVertical: 13,
-                    borderRadius: 12,
-                    backgroundColor: theme.soft,
-                    borderWidth: 1,
-                    borderColor: theme.border,
-                    alignItems: "center",
-                  }}
-                >
-                  <Text
-                    style={{
-                      color: theme.muted,
-                      fontSize: 14,
-                      fontWeight: "800",
-                    }}
-                  >
-                    Batal
-                  </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  onPress={() => void changeDailyGoal(goalInputValue)}
-                  style={{
-                    flex: 1,
-                    paddingVertical: 13,
-                    borderRadius: 12,
-                    backgroundColor: BRAND.primary,
-                    alignItems: "center",
-                  }}
-                >
-                  <Text
-                    style={{
-                      color: "#fff",
-                      fontSize: 14,
-                      fontWeight: "800",
-                    }}
-                  >
-                    Simpan
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          </View>
-        </Modal>
-
         {/* SIDEBAR */}
         <Modal
           visible={sidebarVisible}
@@ -2787,7 +2466,7 @@ export default function App() {
                 />
 
                 <Text style={[styles.sectionTitle, { color: theme.text }]}>
-                  Tampilan & Target
+                  Tampilan
                 </Text>
 
                 <View style={styles.settingRow}>
@@ -2829,49 +2508,6 @@ export default function App() {
                     thumbColor={isDark ? BRAND.primary : "#F8FAFC"}
                   />
                 </View>
-
-                <TouchableOpacity
-                  onPress={() => {
-                    setGoalInputValue(String(dailyGoalKm));
-                    setGoalInputVisible(true);
-                  }}
-                  style={styles.settingRow}
-                >
-                  <View
-                    style={[
-                      styles.settingIcon,
-                      { backgroundColor: BRAND.warningSoft },
-                    ]}
-                  >
-                    <MaterialCommunityIcons
-                      name="target"
-                      size={20}
-                      color={BRAND.warning}
-                    />
-                  </View>
-
-                  <View style={{ flex: 1 }}>
-                    <Text
-                      style={[styles.settingTitle, { color: theme.text }]}
-                    >
-                      Target Harian: {dailyGoalKm} km
-                    </Text>
-                    <Text
-                      style={[
-                        styles.settingDescription,
-                        { color: theme.muted },
-                      ]}
-                    >
-                      Ubah target jarak harian
-                    </Text>
-                  </View>
-
-                  <MaterialCommunityIcons
-                    name="chevron-right"
-                    size={22}
-                    color={theme.muted}
-                  />
-                </TouchableOpacity>
 
                 <View
                   style={[styles.divider, { backgroundColor: theme.border }]}
