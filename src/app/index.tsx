@@ -22,10 +22,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import {
-  SafeAreaProvider,
-  SafeAreaView,
-} from "react-native-safe-area-context";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { WebView } from "react-native-webview";
 
 // ============================================================
@@ -111,6 +108,14 @@ type HistoryItem = {
   pace: number;
 };
 
+type StoredProfile = {
+  profileName: string;
+  gender: Gender;
+  age: string;
+  weight: string;
+  height: string;
+};
+
 // ============================================================
 // CONSTANT
 // ============================================================
@@ -132,6 +137,7 @@ const BACKGROUND_LOCATION_TASK = "IFIT_BACKGROUND_LOCATION";
 const TRACKER_STORAGE_KEY = "@ifit_tracker_state";
 const HISTORY_STORAGE_KEY = "@ifit_history";
 const SETTINGS_STORAGE_KEY = "@ifit_settings";
+const PROFILE_STORAGE_KEY = "@ifit_profile";
 const MAX_HISTORY = 200;
 const SIDEBAR_HISTORY_PREVIEW = 5;
 const AUTO_PAUSE_MS = 20000;
@@ -165,7 +171,7 @@ const getDistanceKm = (
   lat1: number,
   lon1: number,
   lat2: number,
-  lon2: number
+  lon2: number,
 ) => {
   const R = 6371;
   const dLat = (lat2 - lat1) * (Math.PI / 180);
@@ -183,105 +189,95 @@ const getDistanceKm = (
 // ============================================================
 
 if (!TaskManager.isTaskDefined(BACKGROUND_LOCATION_TASK)) {
-  TaskManager.defineTask(
-    BACKGROUND_LOCATION_TASK,
-    async ({ data, error }) => {
-      if (error) {
-        console.log("Background location error:", error);
-        return;
-      }
+  TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
+    if (error) {
+      console.log("Background location error:", error);
+      return;
+    }
 
-      const locations = (
-        data as { locations?: Location.LocationObject[] }
-      )?.locations;
+    const locations = (data as { locations?: Location.LocationObject[] })
+      ?.locations;
 
-      if (!locations?.length) return;
+    if (!locations?.length) return;
 
-      try {
-        const raw = await AsyncStorage.getItem(TRACKER_STORAGE_KEY);
-        if (!raw) return;
+    try {
+      const raw = await AsyncStorage.getItem(TRACKER_STORAGE_KEY);
+      if (!raw) return;
 
-        const state: StoredTrackerState = JSON.parse(raw);
-        if (!state.tracking) return;
-        if (state.paused) return;
+      const state: StoredTrackerState = JSON.parse(raw);
+      if (!state.tracking) return;
+      if (state.paused) return;
 
-        let next = { ...state };
-        if (typeof next.lastSpokenKm !== "number") next.lastSpokenKm = 0;
+      let next = { ...state };
+      if (typeof next.lastSpokenKm !== "number") next.lastSpokenKm = 0;
 
-        const lastGps = locations[locations.length - 1];
-        const point = {
-          latitude: lastGps.coords.latitude,
-          longitude: lastGps.coords.longitude,
-        };
-        const timestamp = lastGps.timestamp || Date.now();
+      const lastGps = locations[locations.length - 1];
+      const point = {
+        latitude: lastGps.coords.latitude,
+        longitude: lastGps.coords.longitude,
+      };
+      const timestamp = lastGps.timestamp || Date.now();
 
-        if (next.lastLocation && next.lastTimestamp) {
-          const dist = getDistanceKm(
-            next.lastLocation.latitude,
-            next.lastLocation.longitude,
-            point.latitude,
-            point.longitude
+      if (next.lastLocation && next.lastTimestamp) {
+        const dist = getDistanceKm(
+          next.lastLocation.latitude,
+          next.lastLocation.longitude,
+          point.latitude,
+          point.longitude,
+        );
+
+        const speed = lastGps.coords.speed;
+        const accuracy = lastGps.coords.accuracy;
+        const hasGoodAccuracy = accuracy == null || accuracy <= 30;
+        const movingBySpeed = speed != null && speed >= 0.5;
+        const movingByDistance = (speed == null || speed < 0) && dist >= 0.005;
+        const moving = hasGoodAccuracy && (movingBySpeed || movingByDistance);
+
+        if (moving && dist > 0 && dist <= 0.2) {
+          const prevKm = Math.floor(next.distance);
+          next.distance += dist;
+          const currentKm = Math.floor(next.distance);
+
+          const elapsed = Math.max(
+            0,
+            Math.floor((timestamp - next.lastTimestamp) / 1000),
           );
+          next.activeDuration += Math.min(elapsed, 30);
 
-          const speed = lastGps.coords.speed;
-          const accuracy = lastGps.coords.accuracy;
-          const hasGoodAccuracy = accuracy == null || accuracy <= 30;
-          const movingBySpeed = speed != null && speed >= 0.5;
-          const movingByDistance =
-            (speed == null || speed < 0) && dist >= 0.005;
-          const moving =
-            hasGoodAccuracy && (movingBySpeed || movingByDistance);
-
-          if (moving && dist > 0 && dist <= 0.2) {
-            const prevKm = Math.floor(next.distance);
-            next.distance += dist;
-            const currentKm = Math.floor(next.distance);
-
-            const elapsed = Math.max(
-              0,
-              Math.floor((timestamp - next.lastTimestamp) / 1000)
-            );
-            next.activeDuration += Math.min(elapsed, 30);
-
-            if (
-              currentKm > prevKm &&
-              currentKm >= 1 &&
-              currentKm > next.lastSpokenKm
-            ) {
-              next.lastSpokenKm = currentKm;
-              try {
-                await Notifications.scheduleNotificationAsync({
-                  content: {
-                    title: "🎉 Pencapaian Baru!",
-                    body: `Kamu sudah mencapai ${currentKm} km!`,
-                    sound: "default",
-                    priority:
-                      Notifications.AndroidNotificationPriority.HIGH,
-                    ...(Platform.OS === "android" && {
-                      channelId: "ifit-km",
-                    }),
-                  },
-                  trigger: null,
-                });
-              } catch (e) {
-                console.log("BG notif error:", e);
-              }
+          if (
+            currentKm > prevKm &&
+            currentKm >= 1 &&
+            currentKm > next.lastSpokenKm
+          ) {
+            next.lastSpokenKm = currentKm;
+            try {
+              await Notifications.scheduleNotificationAsync({
+                content: {
+                  title: "🎉 Pencapaian Baru!",
+                  body: `Kamu sudah mencapai ${currentKm} km!`,
+                  sound: "default",
+                  priority: Notifications.AndroidNotificationPriority.HIGH,
+                  ...(Platform.OS === "android" && {
+                    channelId: "ifit-km",
+                  }),
+                },
+                trigger: null,
+              });
+            } catch (e) {
+              console.log("BG notif error:", e);
             }
           }
         }
-
-        next.lastLocation = point;
-        next.lastTimestamp = timestamp;
-
-        await AsyncStorage.setItem(
-          TRACKER_STORAGE_KEY,
-          JSON.stringify(next)
-        );
-      } catch (error) {
-        console.log("Background tracking error:", error);
       }
+
+      next.lastLocation = point;
+      next.lastTimestamp = timestamp;
+
+      await AsyncStorage.setItem(TRACKER_STORAGE_KEY, JSON.stringify(next));
+    } catch (error) {
+      console.log("Background tracking error:", error);
     }
-  );
+  });
 }
 
 // ============================================================
@@ -465,13 +461,13 @@ export default function App() {
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const backgroundTrackingRef = useRef(false);
   const backgroundSyncInProgressRef = useRef(false);
-  
-  // === FIX MASALAH 1 & 2 & 3 ===
-  const pausedTotalRef = useRef(0);              // total ms di-pause
-  const pauseStartedAtRef = useRef<number | null>(null);  // kapan mulai pause
-  const stoppingRef = useRef(false);             // guard stop dobel
-  const activityTypeRef = useRef<ActivityType>("Joging");  // untuk akses di closure
-  const sessionIdRef = useRef<string | null>(null);  // ID unik per sesi
+
+  // FIX MASALAH 1 & 2 & 3
+  const pausedTotalRef = useRef(0);
+  const pauseStartedAtRef = useRef<number | null>(null);
+  const stoppingRef = useRef(false);
+  const activityTypeRef = useRef<ActivityType>("Joging");
+  const sessionIdRef = useRef<string | null>(null);
 
   // ANIMATION
   const pulseAnim = useRef(new Animated.Value(1)).current;
@@ -485,7 +481,7 @@ export default function App() {
     activityTypeRef.current = activityType;
   }, [activityType]);
 
-  // LOAD SETTINGS & HISTORY
+  // LOAD SETTINGS, HISTORY, PROFILE
   useEffect(() => {
     void loadAll();
   }, []);
@@ -493,6 +489,7 @@ export default function App() {
   const loadAll = async () => {
     await loadHistory();
     await loadSettings();
+    await loadProfile();
     await recoverFromCrash();
   };
 
@@ -502,8 +499,6 @@ export default function App() {
       const raw = await AsyncStorage.getItem(TRACKER_STORAGE_KEY);
       if (!raw) return;
       const state: StoredTrackerState = JSON.parse(raw);
-      // Kalau ada state "tracking=true" tapi app baru buka
-      // berarti app sebelumnya crash → bersihkan state
       if (state.tracking) {
         console.log("Recovering from crash — cleaning stale state");
         await AsyncStorage.setItem(
@@ -514,16 +509,67 @@ export default function App() {
             paused: false,
             lastLocation: null,
             lastTimestamp: null,
-          })
+          }),
         );
       }
-      // Kalau ada pause yang belum selesai, reset
       pausedTotalRef.current = 0;
       pauseStartedAtRef.current = null;
     } catch (e) {
       console.log("recoverFromCrash error:", e);
     }
   };
+
+  // === PROFILE STORAGE (FIX) ===
+  const loadProfile = async () => {
+    try {
+      const raw = await AsyncStorage.getItem(PROFILE_STORAGE_KEY);
+      if (raw) {
+        const parsed: StoredProfile = JSON.parse(raw);
+        if (typeof parsed.profileName === "string") {
+          setProfileName(parsed.profileName);
+        }
+        if (parsed.gender === "Pria" || parsed.gender === "Wanita") {
+          setGender(parsed.gender);
+        }
+        if (typeof parsed.age === "string") setAge(parsed.age);
+        if (typeof parsed.weight === "string") setWeight(parsed.weight);
+        if (typeof parsed.height === "string") setHeight(parsed.height);
+        console.log("Profile loaded:", parsed);
+      }
+    } catch (e) {
+      console.log("Gagal load profile:", e);
+    }
+  };
+
+  const saveProfile = async () => {
+    try {
+      const data: StoredProfile = {
+        profileName,
+        gender,
+        age,
+        weight,
+        height,
+      };
+      await AsyncStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(data));
+    } catch (e) {
+      console.log("Gagal simpan profile:", e);
+    }
+  };
+
+  // Auto-save profile saat user ubah
+  useEffect(() => {
+    // Skip render pertama biar nggak overwrite dengan default
+    if (
+      profileName === "Pengguna IFit" &&
+      !age &&
+      !weight &&
+      !height &&
+      gender === "Pria"
+    ) {
+      return;
+    }
+    void saveProfile();
+  }, [profileName, gender, age, weight, height]);
 
   const loadSettings = async () => {
     try {
@@ -539,18 +585,13 @@ export default function App() {
     }
   };
 
-  const saveSettings = async (
-    overrides: Partial<{ isDark: boolean }> = {}
-  ) => {
+  const saveSettings = async (overrides: Partial<{ isDark: boolean }> = {}) => {
     const data = {
       isDark,
       ...overrides,
     };
     try {
-      await AsyncStorage.setItem(
-        SETTINGS_STORAGE_KEY,
-        JSON.stringify(data)
-      );
+      await AsyncStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(data));
     } catch {}
   };
 
@@ -576,17 +617,13 @@ export default function App() {
     try {
       const raw = await AsyncStorage.getItem(HISTORY_STORAGE_KEY);
       const existing: HistoryItem[] = raw ? JSON.parse(raw) : [];
-      // Cegah duplikat by id
       if (existing.some((h) => h.id === item.id)) {
         console.log("Duplicate history item, skip:", item.id);
         return;
       }
       const updated = [item, ...existing].slice(0, MAX_HISTORY);
       setHistory(updated);
-      await AsyncStorage.setItem(
-        HISTORY_STORAGE_KEY,
-        JSON.stringify(updated)
-      );
+      await AsyncStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(updated));
     } catch (e) {
       console.log("Gagal simpan history:", e);
     }
@@ -596,10 +633,7 @@ export default function App() {
     try {
       const updated = history.filter((h) => h.id !== id);
       setHistory(updated);
-      await AsyncStorage.setItem(
-        HISTORY_STORAGE_KEY,
-        JSON.stringify(updated)
-      );
+      await AsyncStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(updated));
     } catch (e) {
       console.log("Gagal hapus history:", e);
     }
@@ -619,7 +653,7 @@ export default function App() {
             await AsyncStorage.removeItem(HISTORY_STORAGE_KEY);
           },
         },
-      ]
+      ],
     );
   };
 
@@ -679,7 +713,7 @@ export default function App() {
             duration: 700,
             useNativeDriver: true,
           }),
-        ])
+        ]),
       );
       loop.start();
       return () => loop.stop();
@@ -707,12 +741,12 @@ export default function App() {
     }).start(() => setSidebarVisible(false));
   };
 
-  // BMI
+  // === BMI dengan RUMUS DEVINE (FIX) ===
   const calculateBMI = () => {
     if (!weight || !height || !age) {
       Alert.alert(
         "Data belum lengkap",
-        "Harap isi usia, berat, dan tinggi badan."
+        "Harap isi usia, berat, dan tinggi badan.",
       );
       return;
     }
@@ -731,7 +765,7 @@ export default function App() {
     ) {
       Alert.alert(
         "Data tidak valid",
-        "Masukkan usia, berat, dan tinggi dengan angka yang benar."
+        "Masukkan usia, berat, dan tinggi dengan angka yang benar.",
       );
       return;
     }
@@ -744,9 +778,21 @@ export default function App() {
     else if (bmi < 30) setBmiCategory("Gemuk");
     else setBmiCategory("Obesitas");
 
-    const minWeight = 18.5 * (h * h);
-    const maxWeight = 24.9 * (h * h);
-    setIdealWeight(`${minWeight.toFixed(1)} - ${maxWeight.toFixed(1)} kg`);
+    // === RUMUS DEVINE ===
+    const heightCm = h * 100;
+    const ideal =
+      gender === "Pria"
+        ? 50 + 0.9 * (heightCm - 152)
+        : 45.5 + 0.9 * (heightCm - 152);
+
+    const minWeight = ideal * 0.9;
+    const maxWeight = ideal * 1.1;
+
+    setIdealWeight(
+      `${minWeight.toFixed(1)} - ${maxWeight.toFixed(
+        1,
+      )} kg (ideal: ${ideal.toFixed(1)} kg)`,
+    );
   };
 
   const getBmiAdvice = () => {
@@ -825,7 +871,7 @@ export default function App() {
     lat1: number,
     lon1: number,
     lat2: number,
-    lon2: number
+    lon2: number,
   ) => {
     const R = 6371;
     const dLat = (lat2 - lat1) * (Math.PI / 180);
@@ -849,7 +895,6 @@ export default function App() {
     return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
   };
 
-  // SPEAK + NOTIF
   const speakDistance = async (km: number) => {
     void notifyKmReached(km);
     try {
@@ -864,7 +909,6 @@ export default function App() {
     } catch {}
   };
 
-  // UPDATE MAP
   useEffect(() => {
     if (!leafletReady || !currentLocation) return;
     const routeJson = JSON.stringify(route);
@@ -876,9 +920,8 @@ export default function App() {
     `);
   }, [leafletReady, currentLocation, route, isTracking, isPaused, heading]);
 
-  // SAVE TRACKER
   const saveTrackerState = async (
-    overrides: Partial<StoredTrackerState> = {}
+    overrides: Partial<StoredTrackerState> = {},
   ) => {
     const state: StoredTrackerState = {
       tracking: isTracking,
@@ -898,11 +941,11 @@ export default function App() {
     } catch {}
   };
 
-  // BACKGROUND LOCATION
   const startBackgroundLocation = async () => {
     try {
-      const alreadyStarted =
-        await Location.hasStartedLocationUpdatesAsync(BACKGROUND_LOCATION_TASK);
+      const alreadyStarted = await Location.hasStartedLocationUpdatesAsync(
+        BACKGROUND_LOCATION_TASK,
+      );
       if (!alreadyStarted) {
         await Location.startLocationUpdatesAsync(BACKGROUND_LOCATION_TASK, {
           accuracy: Location.Accuracy.High,
@@ -927,7 +970,7 @@ export default function App() {
   const stopBackgroundLocation = async () => {
     try {
       const started = await Location.hasStartedLocationUpdatesAsync(
-        BACKGROUND_LOCATION_TASK
+        BACKGROUND_LOCATION_TASK,
       );
       if (started) {
         await Location.stopLocationUpdatesAsync(BACKGROUND_LOCATION_TASK);
@@ -973,13 +1016,12 @@ export default function App() {
     }
   };
 
-  // === FIX MASALAH 1: restart timer helper ===
   const startTimer = () => {
     if (timerRef.current) clearInterval(timerRef.current);
     timerRef.current = setInterval(() => {
       if (startTimeRef.current !== null) {
         const elapsed = Math.floor(
-          (Date.now() - startTimeRef.current - pausedTotalRef.current) / 1000
+          (Date.now() - startTimeRef.current - pausedTotalRef.current) / 1000,
         );
         setDuration(Math.max(0, elapsed));
 
@@ -994,11 +1036,9 @@ export default function App() {
     }, 1000);
   };
 
-  // START TRACKING
   const startTracking = async () => {
     if (isTracking) return;
-    
-    // Reset state lengkap
+
     lastSpokenKmRef.current = 0;
     isMovingRef.current = false;
     isPausedRef.current = false;
@@ -1025,13 +1065,12 @@ export default function App() {
         setLocationStatus("GPS tidak aktif");
         Alert.alert(
           "GPS Tidak Aktif",
-          "Aktifkan Lokasi/GPS pada HP terlebih dahulu, lalu tekan Mulai lagi."
+          "Aktifkan Lokasi/GPS pada HP terlebih dahulu, lalu tekan Mulai lagi.",
         );
         return;
       }
 
-      let foregroundPermission =
-        await Location.getForegroundPermissionsAsync();
+      let foregroundPermission = await Location.getForegroundPermissionsAsync();
       if (foregroundPermission.status !== "granted") {
         foregroundPermission =
           await Location.requestForegroundPermissionsAsync();
@@ -1040,7 +1079,7 @@ export default function App() {
         setLocationStatus("Izin lokasi ditolak");
         Alert.alert(
           "Izin Lokasi Diperlukan",
-          "Izinkan IFit menggunakan lokasi perangkat agar jarak dan posisi pada peta dapat dihitung."
+          "Izinkan IFit menggunakan lokasi perangkat agar jarak dan posisi pada peta dapat dihitung.",
         );
         return;
       }
@@ -1118,7 +1157,7 @@ export default function App() {
                     clearTimeout(timeout);
                     if (subscription) subscription.remove();
                     resolve(location);
-                  }
+                  },
                 );
               } catch (error) {
                 if (finished) return;
@@ -1126,7 +1165,7 @@ export default function App() {
                 clearTimeout(timeout);
                 reject(error);
               }
-            }
+            },
           );
         } catch (error) {
           console.log("Watch position gagal:", error);
@@ -1142,7 +1181,6 @@ export default function App() {
         longitude: firstLocation.coords.longitude,
       };
 
-      // Generate session ID unik
       const sessionId = `${Date.now()}-${Math.random()
         .toString(36)
         .slice(2, 8)}`;
@@ -1188,9 +1226,8 @@ export default function App() {
           distanceInterval: 1,
         },
         (newLocation) => {
-          // Guard: pastikan session masih sama
           if (sessionIdRef.current !== sessionId) return;
-          
+
           const point: LatLng = {
             latitude: newLocation.coords.latitude,
             longitude: newLocation.coords.longitude,
@@ -1201,7 +1238,7 @@ export default function App() {
               lastLocation.current.latitude,
               lastLocation.current.longitude,
               point.latitude,
-              point.longitude
+              point.longitude,
             );
 
             const speed = newLocation.coords.speed;
@@ -1216,19 +1253,17 @@ export default function App() {
             if (rawMoving) {
               movingSamplesRef.current = Math.min(
                 movingSamplesRef.current + 1,
-                3
+                3,
               );
               lastMovementAtRef.current = Date.now();
             } else {
               movingSamplesRef.current = 0;
             }
 
-            const currentlyMoving =
-              rawMoving && movingSamplesRef.current >= 2;
+            const currentlyMoving = rawMoving && movingSamplesRef.current >= 2;
             isMovingRef.current = currentlyMoving;
             setIsMoving(currentlyMoving);
 
-            // AUTO-PAUSE
             const idleMs = Date.now() - lastMovementAtRef.current;
             const shouldAutoPause =
               idleMs >= AUTO_PAUSE_MS && currentlyMoving === false;
@@ -1256,7 +1291,7 @@ export default function App() {
               setLocationStatus(
                 currentlyMoving
                   ? "GPS aktif • Sedang bergerak"
-                  : "GPS aktif • Menunggu gerakan"
+                  : "GPS aktif • Menunggu gerakan",
               );
             }
 
@@ -1283,10 +1318,7 @@ export default function App() {
               setDistance(newDistance);
 
               const currentKm = Math.floor(distanceRef.current);
-              if (
-                currentKm > lastSpokenKmRef.current &&
-                currentKm >= 1
-              ) {
+              if (currentKm > lastSpokenKmRef.current && currentKm >= 1) {
                 lastSpokenKmRef.current = currentKm;
                 void saveTrackerState({
                   tracking: true,
@@ -1309,13 +1341,12 @@ export default function App() {
             ) {
               setRoute((previousRoute) => {
                 if (previousRoute.length > 0) {
-                  const lastPoint =
-                    previousRoute[previousRoute.length - 1];
+                  const lastPoint = previousRoute[previousRoute.length - 1];
                   const pointDistance = getDistance(
                     lastPoint.latitude,
                     lastPoint.longitude,
                     point.latitude,
-                    point.longitude
+                    point.longitude,
                   );
                   if (pointDistance < 0.001) return previousRoute;
                 }
@@ -1332,7 +1363,7 @@ export default function App() {
 
           lastLocation.current = point;
           setCurrentLocation(point);
-        }
+        },
       );
 
       setLocationSub(subscription);
@@ -1356,27 +1387,25 @@ export default function App() {
 
       Alert.alert(
         "GPS Bermasalah",
-        "IFit belum berhasil mendapatkan posisi GPS. Pastikan Lokasi aktif dan izin lokasi untuk IFit sudah diberikan, lalu coba lagi."
+        "IFit belum berhasil mendapatkan posisi GPS. Pastikan Lokasi aktif dan izin lokasi untuk IFit sudah diberikan, lalu coba lagi.",
       );
     }
   };
 
-  // === FIX MASALAH 1: PAUSE / RESUME dengan timer stop ===
   const pauseTracking = async () => {
     if (!isTracking) return;
     if (isPausedRef.current) return;
-    
+
     setIsPaused(true);
     isPausedRef.current = true;
     pauseStartedAtRef.current = Date.now();
     setLocationStatus("Dijeda • Timer berhenti");
-    
-    // STOP timer
+
     if (timerRef.current) {
       clearInterval(timerRef.current);
       timerRef.current = null;
     }
-    
+
     await saveTrackerState({
       tracking: true,
       paused: true,
@@ -1391,22 +1420,20 @@ export default function App() {
   const resumeTracking = async () => {
     if (!isTracking) return;
     if (!isPausedRef.current) return;
-    
-    // Akumulasi waktu pause
+
     if (pauseStartedAtRef.current !== null) {
       pausedTotalRef.current += Date.now() - pauseStartedAtRef.current;
       pauseStartedAtRef.current = null;
     }
-    
+
     setIsPaused(false);
     isPausedRef.current = false;
     autoPausedRef.current = false;
     lastMovementAtRef.current = Date.now();
     setLocationStatus("GPS aktif • Menunggu gerakan");
-    
-    // RESTART timer
+
     startTimer();
-    
+
     await saveTrackerState({
       tracking: true,
       paused: false,
@@ -1418,23 +1445,20 @@ export default function App() {
     });
   };
 
-  // === FIX MASALAH 2 & 3: STOP dengan guard + reset total ===
   const stopTracking = async () => {
     if (stoppingRef.current) return;
     if (!isTracking) return;
     stoppingRef.current = true;
 
     try {
-      // Hitung durasi final
       let finalDuration = duration;
       if (startTimeRef.current !== null) {
         const elapsed = Math.floor(
-          (Date.now() - startTimeRef.current - pausedTotalRef.current) / 1000
+          (Date.now() - startTimeRef.current - pausedTotalRef.current) / 1000,
         );
         finalDuration = Math.max(0, elapsed);
       }
-      
-      // Snapshot nilai saat ini (biar nggak kena async setState)
+
       const finalDistance = distanceRef.current;
       const finalActiveDuration = activeDuration;
       const finalCalories = calories;
@@ -1442,7 +1466,6 @@ export default function App() {
       const finalActivityType = activityTypeRef.current;
       const finalSessionId = sessionIdRef.current;
 
-      // Set state UI
       setIsTracking(false);
       setIsPaused(false);
       isPausedRef.current = false;
@@ -1451,7 +1474,6 @@ export default function App() {
       movingSamplesRef.current = 0;
       setIsMoving(false);
 
-      // Clear timer & subscription
       if (timerRef.current) {
         clearInterval(timerRef.current);
         timerRef.current = null;
@@ -1466,10 +1488,11 @@ export default function App() {
 
       await stopBackgroundLocation();
 
-      // Simpan ke riwayat
       if (finalDistance > 0.01 || finalActiveDuration > 5) {
         const historyItem: HistoryItem = {
-          id: finalSessionId ?? `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          id:
+            finalSessionId ??
+            `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           date: Date.now(),
           activityType: finalActivityType,
           distance: finalDistance,
@@ -1482,7 +1505,6 @@ export default function App() {
         console.log("Riwayat disimpan:", historyItem);
       }
 
-      // Reset semua state
       setDistance(0);
       distanceRef.current = 0;
       setDuration(0);
@@ -1514,7 +1536,7 @@ export default function App() {
             lastTimestamp: null,
             lastSpokenKm: 0,
             startedAt: null,
-          } as StoredTrackerState)
+          } as StoredTrackerState),
         );
       } catch {}
 
@@ -1524,14 +1546,11 @@ export default function App() {
     }
   };
 
-  // RESET TRACKING
   const resetTracking = async () => {
     await stopTracking();
-    // State sudah di-reset di stopTracking
     setLocationStatus("Lokasi belum aktif");
   };
 
-  // CALORIES
   useEffect(() => {
     if (activeDuration > 0) {
       const userWeight = parseFloat(weight) > 0 ? parseFloat(weight) : 60;
@@ -1558,7 +1577,6 @@ export default function App() {
     });
   }, [isTracking, distance, activeDuration, activityType, weight]);
 
-  // PACE
   useEffect(() => {
     if (distance <= 0 || activeDuration <= 0) {
       setPace(0);
@@ -1571,7 +1589,6 @@ export default function App() {
     }
   }, [distance, activeDuration, activityType]);
 
-  // APP STATE
   useEffect(() => {
     const subscription = AppState.addEventListener(
       "change",
@@ -1594,15 +1611,13 @@ export default function App() {
               lastTimestamp: Date.now(),
               lastSpokenKm: lastSpokenKmRef.current,
             });
-            // Cuma start background kalau TIDAK paused
             if (!isPausedRef.current) {
               await startBackgroundLocation();
             }
           }
 
           if (
-            (previousState === "background" ||
-              previousState === "inactive") &&
+            (previousState === "background" || previousState === "inactive") &&
             nextState === "active" &&
             isTracking
           ) {
@@ -1616,10 +1631,9 @@ export default function App() {
               void (async () => {
                 try {
                   if (lastLocation.current && !isPausedRef.current) {
-                    const latest =
-                      await Location.getCurrentPositionAsync({
-                        accuracy: Location.Accuracy.High,
-                      });
+                    const latest = await Location.getCurrentPositionAsync({
+                      accuracy: Location.Accuracy.High,
+                    });
 
                     const point: LatLng = {
                       latitude: latest.coords.latitude,
@@ -1630,7 +1644,7 @@ export default function App() {
                       lastLocation.current.latitude,
                       lastLocation.current.longitude,
                       point.latitude,
-                      point.longitude
+                      point.longitude,
                     );
 
                     if (dist > 0 && dist <= 0.2) {
@@ -1669,12 +1683,11 @@ export default function App() {
             }, 150);
           }
         })();
-      }
+      },
     );
     return () => subscription.remove();
   }, [isTracking, activeDuration]);
 
-  // CLEANUP
   useEffect(() => {
     return () => {
       if (timerRef.current) {
@@ -1692,7 +1705,6 @@ export default function App() {
     };
   }, [locationSub]);
 
-  // FORMAT
   const formatTime = (secs: number) => {
     const h = Math.floor(secs / 3600)
       .toString()
@@ -1757,9 +1769,7 @@ export default function App() {
             },
           ]}
         >
-          <View
-            style={{ flexDirection: "row", alignItems: "center", flex: 1 }}
-          >
+          <View style={{ flexDirection: "row", alignItems: "center", flex: 1 }}>
             <View
               style={[
                 styles.logoCircle,
@@ -1826,8 +1836,7 @@ export default function App() {
                 style={[
                   styles.genderBtn,
                   {
-                    borderColor:
-                      gender === "Pria" ? BRAND.male : theme.border,
+                    borderColor: gender === "Pria" ? BRAND.male : theme.border,
                     backgroundColor:
                       gender === "Pria" ? BRAND.male : theme.input,
                   },
@@ -1884,9 +1893,7 @@ export default function App() {
 
             <View style={styles.row}>
               <View style={styles.inputGroup}>
-                <Text style={[styles.label, { color: theme.muted }]}>
-                  Usia
-                </Text>
+                <Text style={[styles.label, { color: theme.muted }]}>Usia</Text>
                 <TextInput
                   style={[
                     styles.input,
@@ -1973,15 +1980,12 @@ export default function App() {
                   {bmiCategory}
                 </Text>
                 <Text style={[styles.resultIdeal, { color: theme.muted }]}>
-                  Rentang referensi BMI dewasa: {idealWeight}
+                  Rentang berat ideal ({gender}): {idealWeight}
                 </Text>
 
                 {advice && (
                   <View
-                    style={[
-                      styles.adviceBox,
-                      { borderTopColor: theme.border },
-                    ]}
+                    style={[styles.adviceBox, { borderTopColor: theme.border }]}
                   >
                     <View style={styles.adviceTitleRow}>
                       <MaterialCommunityIcons
@@ -1989,9 +1993,7 @@ export default function App() {
                         size={20}
                         color={BRAND.warning}
                       />
-                      <Text
-                        style={[styles.adviceTitle, { color: theme.text }]}
-                      >
+                      <Text style={[styles.adviceTitle, { color: theme.text }]}>
                         {advice.title}
                       </Text>
                     </View>
@@ -2050,12 +2052,10 @@ export default function App() {
                       ))}
                     </View>
 
-                    <Text
-                      style={[styles.disclaimer, { color: theme.muted }]}
-                    >
+                    <Text style={[styles.disclaimer, { color: theme.muted }]}>
                       Catatan: pada usia di bawah 18 tahun, BMI tidak sebaiknya
-                      ditafsirkan dengan kategori dewasa saja. Gunakan hasil
-                      ini sebagai informasi awal, bukan diagnosis medis.
+                      ditafsirkan dengan kategori dewasa saja. Gunakan hasil ini
+                      sebagai informasi awal, bukan diagnosis medis.
                     </Text>
                   </View>
                 )}
@@ -2072,11 +2072,7 @@ export default function App() {
                   { backgroundColor: BRAND.primarySoft },
                 ]}
               >
-                <FontAwesome5
-                  name="running"
-                  size={23}
-                  color={BRAND.primary}
-                />
+                <FontAwesome5 name="running" size={23} color={BRAND.primary} />
               </View>
 
               <View style={{ flex: 1 }}>
@@ -2113,8 +2109,7 @@ export default function App() {
                     style={[
                       styles.activityText,
                       {
-                        color:
-                          activityType === act ? "#fff" : theme.muted,
+                        color: activityType === act ? "#fff" : theme.muted,
                       },
                     ]}
                   >
@@ -2157,10 +2152,10 @@ export default function App() {
                     backgroundColor: isPaused
                       ? BRAND.warning
                       : isMoving
-                      ? BRAND.primary
-                      : isTracking
-                      ? BRAND.warning
-                      : theme.muted,
+                        ? BRAND.primary
+                        : isTracking
+                          ? BRAND.warning
+                          : theme.muted,
                     transform: [{ scale: pulseAnim }],
                   },
                 ]}
@@ -2173,10 +2168,10 @@ export default function App() {
                   {isPaused
                     ? "Dijeda"
                     : isTracking
-                    ? isMoving
-                      ? "Sedang bergerak"
-                      : "Tidak bergerak"
-                    : "Pelacakan belum dimulai"}
+                      ? isMoving
+                        ? "Sedang bergerak"
+                        : "Tidak bergerak"
+                      : "Pelacakan belum dimulai"}
                 </Text>
                 <Text
                   style={[styles.trackingStatusText, { color: theme.muted }]}
@@ -2202,9 +2197,7 @@ export default function App() {
               <View style={styles.statBox}>
                 <FontAwesome5
                   name={
-                    activityType === "Bersepeda"
-                      ? "tachometer-alt"
-                      : "running"
+                    activityType === "Bersepeda" ? "tachometer-alt" : "running"
                   }
                   size={19}
                   color={theme.muted}
@@ -2213,24 +2206,18 @@ export default function App() {
                   {activityType === "Bersepeda"
                     ? `${pace.toFixed(1)}`
                     : pace > 0
-                    ? `${Math.floor(pace)}:${Math.round((pace % 1) * 60)
-                        .toString()
-                        .padStart(2, "0")}`
-                    : "--"}
+                      ? `${Math.floor(pace)}:${Math.round((pace % 1) * 60)
+                          .toString()
+                          .padStart(2, "0")}`
+                      : "--"}
                 </Text>
                 <Text style={[styles.statLabel, { color: theme.muted }]}>
-                  {activityType === "Bersepeda"
-                    ? "KM/JAM"
-                    : "PACE MIN/KM"}
+                  {activityType === "Bersepeda" ? "KM/JAM" : "PACE MIN/KM"}
                 </Text>
               </View>
 
               <View style={styles.statBox}>
-                <FontAwesome5
-                  name="stopwatch"
-                  size={19}
-                  color={theme.muted}
-                />
+                <FontAwesome5 name="stopwatch" size={19} color={theme.muted} />
                 <Text style={[styles.statValue, { color: theme.text }]}>
                   {formatTime(duration)}
                 </Text>
@@ -2240,11 +2227,7 @@ export default function App() {
               </View>
 
               <View style={styles.statBox}>
-                <FontAwesome5
-                  name="fire-alt"
-                  size={19}
-                  color={BRAND.danger}
-                />
+                <FontAwesome5 name="fire-alt" size={19} color={BRAND.danger} />
                 <Text style={[styles.statValue, { color: theme.text }]}>
                   {calories.toFixed(0)}
                 </Text>
@@ -2292,10 +2275,7 @@ export default function App() {
 
               {isTracking && (
                 <TouchableOpacity
-                  style={[
-                    styles.controlBtn,
-                    { backgroundColor: BRAND.danger },
-                  ]}
+                  style={[styles.controlBtn, { backgroundColor: BRAND.danger }]}
                   onPress={stopTracking}
                 >
                   <FontAwesome5 name="stop" size={14} color="#fff" />
@@ -2304,10 +2284,7 @@ export default function App() {
               )}
 
               <TouchableOpacity
-                style={[
-                  styles.controlBtn,
-                  { backgroundColor: "#64748B" },
-                ]}
+                style={[styles.controlBtn, { backgroundColor: "#64748B" }]}
                 onPress={resetTracking}
               >
                 <FontAwesome5 name="redo" size={14} color="#fff" />
@@ -2368,9 +2345,7 @@ export default function App() {
                   <Text style={[styles.drawerTitle, { color: theme.text }]}>
                     IFit
                   </Text>
-                  <Text
-                    style={[styles.drawerSubtitle, { color: theme.muted }]}
-                  >
+                  <Text style={[styles.drawerSubtitle, { color: theme.muted }]}>
                     Profil & Pengaturan
                   </Text>
                 </View>
@@ -2409,26 +2384,18 @@ export default function App() {
 
                 <View style={styles.profileInfo}>
                   <View>
-                    <Text
-                      style={[styles.profileLabel, { color: theme.muted }]}
-                    >
+                    <Text style={[styles.profileLabel, { color: theme.muted }]}>
                       Gender
                     </Text>
-                    <Text
-                      style={[styles.profileValue, { color: theme.text }]}
-                    >
+                    <Text style={[styles.profileValue, { color: theme.text }]}>
                       {gender}
                     </Text>
                   </View>
                   <View>
-                    <Text
-                      style={[styles.profileLabel, { color: theme.muted }]}
-                    >
+                    <Text style={[styles.profileLabel, { color: theme.muted }]}>
                       Usia
                     </Text>
-                    <Text
-                      style={[styles.profileValue, { color: theme.text }]}
-                    >
+                    <Text style={[styles.profileValue, { color: theme.text }]}>
                       {age ? `${age} tahun` : "-"}
                     </Text>
                   </View>
@@ -2436,26 +2403,18 @@ export default function App() {
 
                 <View style={styles.profileInfo}>
                   <View>
-                    <Text
-                      style={[styles.profileLabel, { color: theme.muted }]}
-                    >
+                    <Text style={[styles.profileLabel, { color: theme.muted }]}>
                       Berat
                     </Text>
-                    <Text
-                      style={[styles.profileValue, { color: theme.text }]}
-                    >
+                    <Text style={[styles.profileValue, { color: theme.text }]}>
                       {weight ? `${weight} kg` : "-"}
                     </Text>
                   </View>
                   <View>
-                    <Text
-                      style={[styles.profileLabel, { color: theme.muted }]}
-                    >
+                    <Text style={[styles.profileLabel, { color: theme.muted }]}>
                       Tinggi
                     </Text>
-                    <Text
-                      style={[styles.profileValue, { color: theme.text }]}
-                    >
+                    <Text style={[styles.profileValue, { color: theme.text }]}>
                       {height ? `${height} cm` : "-"}
                     </Text>
                   </View>
@@ -2477,18 +2436,14 @@ export default function App() {
                     ]}
                   >
                     <MaterialCommunityIcons
-                      name={
-                        isDark ? "weather-night" : "white-balance-sunny"
-                      }
+                      name={isDark ? "weather-night" : "white-balance-sunny"}
                       size={20}
                       color={BRAND.primary}
                     />
                   </View>
 
                   <View style={{ flex: 1 }}>
-                    <Text
-                      style={[styles.settingTitle, { color: theme.text }]}
-                    >
+                    <Text style={[styles.settingTitle, { color: theme.text }]}>
                       Mode {isDark ? "Gelap" : "Terang"}
                     </Text>
                     <Text
@@ -2533,10 +2488,7 @@ export default function App() {
                     <TouchableOpacity
                       onPress={() => {
                         closeSidebar();
-                        setTimeout(
-                          () => setHistoryModalVisible(true),
-                          250
-                        );
+                        setTimeout(() => setHistoryModalVisible(true), 250);
                       }}
                     >
                       <Text
@@ -2555,16 +2507,12 @@ export default function App() {
                 {history.length > 0 && (
                   <View
                     style={{
-                      backgroundColor: isDark
-                        ? "#064E3B"
-                        : BRAND.primarySoft,
+                      backgroundColor: isDark ? "#064E3B" : BRAND.primarySoft,
                       borderRadius: 12,
                       padding: 14,
                       marginBottom: 12,
                       borderWidth: 1,
-                      borderColor: isDark
-                        ? "#10B981"
-                        : BRAND.primaryLight,
+                      borderColor: isDark ? "#10B981" : BRAND.primaryLight,
                     }}
                   >
                     <View
@@ -2689,19 +2637,14 @@ export default function App() {
 
                 {history.length === 0 ? (
                   <View
-                    style={[
-                      styles.aboutBox,
-                      { backgroundColor: theme.soft },
-                    ]}
+                    style={[styles.aboutBox, { backgroundColor: theme.soft }]}
                   >
                     <MaterialCommunityIcons
                       name="history"
                       size={20}
                       color={theme.muted}
                     />
-                    <Text
-                      style={[styles.aboutText, { color: theme.muted }]}
-                    >
+                    <Text style={[styles.aboutText, { color: theme.muted }]}>
                       Belum ada riwayat. Selesaikan satu sesi tracking lalu
                       tekan "Berhenti" untuk menyimpan riwayat.
                     </Text>
@@ -2768,8 +2711,7 @@ export default function App() {
                                 marginTop: 1,
                               }}
                             >
-                              {formatDate(item.date)} •{" "}
-                              {formatClock(item.date)}
+                              {formatDate(item.date)} • {formatClock(item.date)}
                             </Text>
                           </View>
                         </View>
@@ -2866,10 +2808,7 @@ export default function App() {
                   <TouchableOpacity
                     onPress={() => {
                       closeSidebar();
-                      setTimeout(
-                        () => setHistoryModalVisible(true),
-                        250
-                      );
+                      setTimeout(() => setHistoryModalVisible(true), 250);
                     }}
                     style={{
                       backgroundColor: BRAND.primarySoft,
@@ -2907,8 +2846,8 @@ export default function App() {
                   />
                   <Text style={[styles.aboutText, { color: theme.muted }]}>
                     IFit membantu menghitung BMI dan memantau aktivitas
-                    menggunakan lokasi perangkat. Data profil pada tampilan
-                    ini hanya digunakan selama aplikasi berjalan.
+                    menggunakan lokasi perangkat. Data profil pada tampilan ini
+                    hanya digunakan selama aplikasi berjalan.
                   </Text>
                 </View>
               </ScrollView>
@@ -3016,9 +2955,7 @@ export default function App() {
                       paddingHorizontal: 14,
                       paddingVertical: 8,
                       borderRadius: 20,
-                      backgroundColor: active
-                        ? BRAND.primary
-                        : theme.soft,
+                      backgroundColor: active ? BRAND.primary : theme.soft,
                       borderWidth: 1,
                       borderColor: active ? BRAND.primary : theme.border,
                     }}
@@ -3063,10 +3000,7 @@ export default function App() {
                     value: historyStats.totalCalories.toFixed(0),
                   },
                 ].map((s) => (
-                  <View
-                    key={s.label}
-                    style={{ alignItems: "center", flex: 1 }}
-                  >
+                  <View key={s.label} style={{ alignItems: "center", flex: 1 }}>
                     <Text
                       style={{
                         color: theme.muted,
@@ -3187,8 +3121,7 @@ export default function App() {
                               marginTop: 2,
                             }}
                           >
-                            {formatDate(item.date)} •{" "}
-                            {formatClock(item.date)}
+                            {formatDate(item.date)} • {formatClock(item.date)}
                           </Text>
                         </View>
                       </View>
@@ -3689,9 +3622,7 @@ const styles = StyleSheet.create({
     bottom: 0,
     width: Math.min(SCREEN_WIDTH * 0.86, 360),
     paddingTop:
-      Platform.OS === "android"
-        ? (StatusBar.currentHeight || 0) + 10
-        : 45,
+      Platform.OS === "android" ? (StatusBar.currentHeight || 0) + 10 : 45,
     paddingHorizontal: 20,
     elevation: 12,
     shadowColor: "#000",
